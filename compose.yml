@@ -1,0 +1,223 @@
+services:
+  postgres-0:
+    image: "postgres:15-alpine"
+    environment:
+      - POSTGRES_HOST_AUTH_METHOD=trust
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=metadata
+    ports:
+      - "8432:5432"
+    volumes:
+      - "${PWD}/rwdata/postgres-0:/var/lib/postgresql/data:Z"
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  minio-0:
+    image: "quay.io/minio/minio:latest"
+    command:
+      - server
+      - "--address"
+      - "0.0.0.0:9301"
+      - "--console-address"
+      - "0.0.0.0:9400"
+      - /data
+    ports:
+      - "9301:9301"
+      - "9400:9400"
+    entrypoint: |
+      /bin/sh -c '
+      set -e
+      mkdir -p "/data/hummock001"
+      /usr/bin/docker-entrypoint.sh "$$0" "$$@"
+      '
+    environment:
+      MINIO_ROOT_PASSWORD: hummockadmin
+      MINIO_ROOT_USER: hummockadmin
+    volumes:
+      - "${PWD}/rwdata/minio-0:/data:Z"
+    restart: always
+
+  meta-node-0:
+    image: ${RW_IMAGE:-risingwavelabs/risingwave:v2.7.0}
+    cpus: "1.0"
+    mem_limit: 4g
+    command:
+      - meta-node
+      - "--listen-addr"
+      - "0.0.0.0:5690"
+      - "--advertise-addr"
+      - "meta-node-0:5690"
+      - "--dashboard-host"
+      - "0.0.0.0:5691"
+      - "--prometheus-host"
+      - "0.0.0.0:1250"
+      - "--prometheus-endpoint"
+      - "http://prometheus-0:9500"
+      - "--backend"
+      - sql
+      - "--sql-endpoint"
+      - "postgres://postgres:@postgres-0:5432/metadata"
+      - "--state-store"
+      - "hummock+minio://hummockadmin:hummockadmin@minio-0:9301/hummock001"
+      - "--data-directory"
+      - "hummock_001"
+      - "--config-path"
+      - /risingwave.toml
+    ports:
+      - "5690:5690"
+      - "5691:5691"
+    depends_on:
+      - postgres-0
+      - minio-0
+    volumes:
+      - "./risingwave.toml:/risingwave.toml:z"
+    environment:
+      RUST_BACKTRACE: "1"
+      ENABLE_TELEMETRY: "true"
+    restart: always
+
+  frontend-node-0:
+    image: ${RW_IMAGE:-risingwavelabs/risingwave:v2.7.0}
+    cpus: "1.0"
+    mem_limit: 4g
+    command:
+      - frontend-node
+      - "--listen-addr"
+      - "0.0.0.0:4566"
+      - "--advertise-addr"
+      - "frontend-node-0:4566"
+      - "--meta-addr"
+      - "http://meta-node-0:5690"
+      - "--config-path"
+      - /risingwave.toml
+      - "--prometheus-listener-addr"
+      - "0.0.0.0:2222"
+    ports:
+      - "4566:4566"
+    depends_on:
+      - meta-node-0
+    volumes:
+      - "./risingwave.toml:/risingwave.toml:z"
+    environment:
+      RUST_BACKTRACE: "1"
+      ENABLE_TELEMETRY: "true"
+    restart: always
+
+  compute-node-0:
+    image: ${RW_IMAGE:-risingwavelabs/risingwave:v2.7.0}
+    cpus: "2.0"
+    mem_limit: 8g
+    command:
+      - compute-node
+      - "--listen-addr"
+      - "0.0.0.0:5688"
+      - "--advertise-addr"
+      - "compute-node-0:5688"
+      - "--prometheus-listener-addr"
+      - "0.0.0.0:1222"
+      - "--meta-address"
+      - "http://meta-node-0:5690"
+      - "--config-path"
+      - /risingwave.toml
+    depends_on:
+      - meta-node-0
+    volumes:
+      - "./risingwave.toml:/risingwave.toml:z"
+    environment:
+      RUST_BACKTRACE: "1"
+      ENABLE_TELEMETRY: "true"
+    restart: always
+
+  # # Optional: add more compute nodes (simple “cluster scale” on one host)
+  # compute-node-1:
+  #   image: ${RW_IMAGE:-risingwavelabs/risingwave:latest}
+  #   command:
+  #     - compute-node
+  #     - "--listen-addr"
+  #     - "0.0.0.0:5688"
+  #     - "--advertise-addr"
+  #     - "compute-node-1:5688"
+  #     - "--meta-address"
+  #     - "http://meta-node-0:5690"
+  #     - "--config-path"
+  #     - /risingwave.toml
+  #   depends_on:
+  #     - meta-node-0
+  #   volumes:
+  #     - "./risingwave.toml:/risingwave.toml:z"
+  #   environment:
+  #     RUST_BACKTRACE: "1"
+  #     ENABLE_TELEMETRY: "true"
+  #   restart: always
+
+  compactor-0:
+    image: ${RW_IMAGE:-risingwavelabs/risingwave:v2.7.0}
+    cpus: "1.0"
+    mem_limit: 4g
+    command:
+      - compactor-node
+      - "--listen-addr"
+      - "0.0.0.0:6660"
+      - "--advertise-addr"
+      - "compactor-0:6660"
+      - "--prometheus-listener-addr"
+      - "0.0.0.0:1260"
+      - "--meta-address"
+      - "http://meta-node-0:5690"
+      - "--config-path"
+      - /risingwave.toml
+    depends_on:
+      - meta-node-0
+    volumes:
+      - "./risingwave.toml:/risingwave.toml:z"
+    environment:
+      RUST_BACKTRACE: "1"
+      ENABLE_TELEMETRY: "true"
+    restart: always
+
+  prometheus-0:
+    image: "prom/prometheus:latest"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.listen-address=0.0.0.0:9500"
+      - "--storage.tsdb.retention.time=30d"
+    ports:
+      - "9500:9500"
+    volumes:
+      - "prometheus-0:/prometheus"
+      - "./prometheus.yaml:/etc/prometheus/prometheus.yaml:Z"
+    environment: {}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9500/-/healthy || exit 1"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+    restart: always
+
+  grafana-0:
+    image: "grafana/grafana-oss:latest"
+    ports:
+      - "3001:3001"
+    volumes:
+      - "grafana-0:/var/lib/grafana"
+      - "./grafana.ini:/etc/grafana/grafana.ini:Z"
+      - "./grafana-risedev-datasource.yaml:/etc/grafana/provisioning/datasources/grafana-risedev-datasource.yaml:Z"
+      - "./grafana-risedev-dashboard.yaml:/etc/grafana/provisioning/dashboards/grafana-risedev-dashboard.yaml:Z"
+      - "./dashboards:/dashboards:Z"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3001/ || exit 1"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+    restart: always
+
+volumes:
+  prometheus-0:
+  grafana-0:
