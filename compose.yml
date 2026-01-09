@@ -195,7 +195,7 @@ services:
       - "./prometheus.yaml:/etc/prometheus/prometheus.yaml:Z"
     environment: {}
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9500/-/healthy || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9500/-/healthy || exit 1"]
       interval: 1s
       timeout: 5s
       retries: 5
